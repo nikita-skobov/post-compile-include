@@ -96,6 +96,31 @@ pub fn get_data_write_required_len(write_data: &Vec<DataToWrite>) -> usize {
     total_write_data
 }
 
+/// given a path to a compiled file, read it's included section,
+/// and insert your data into it, and then write it back out.
+/// for fine grained writing to an in-memory data, see
+/// `write_to_included_section`
+pub fn write_to_compiled_file(
+    file_name: &str,
+    write_data: Vec<DataToWrite>,
+) -> Result<(), String> {
+    let mut f = std::fs::File::open(&file_name)
+        .map_err(|e| format!("Failed to open file for reading: {}", e))?;
+    let mut file_data = vec![];
+    f.read_to_end(&mut file_data)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    write_to_included_section(&mut file_data, write_data)?;
+    drop(f);
+    let mut outf = std::fs::File::create(&file_name)
+        .map_err(|e| format!("Failed to open file for writing: {}", e))?;
+    outf.write_all(&file_data[..])
+        .map_err(|e| format!("Failed to write to file: {}", e))?;
+    Ok(())
+}
+
+/// The included mutable vec is the data that is going to be mutated. This should be
+/// the entire file data of the compiled file. After writing to this vec, you can
+/// save it out to a file
 pub fn write_to_included_section(
     included: &mut Vec<u8>,
     mut write_data: Vec<DataToWrite>,
