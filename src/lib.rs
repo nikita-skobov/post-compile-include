@@ -1,4 +1,4 @@
-use std::io::{Write, Cursor, Read};
+use std::{io::{Write, Cursor, Read}, collections::HashMap};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 const WEIRD_CHAR: u8 = b'q';
@@ -196,11 +196,13 @@ pub fn iter_data_section<Cb: FnMut(usize, String, &[u8]) -> bool>(
             .map_err(|e| format!("Failed to read data header of size 4: {}", e))?;
         let data_header_size = data_header_size as usize;
         let cursor_pos = cursor.position() as usize;
-        if let Some(data_piece) = data.get(cursor_pos..(cursor_pos + data_header_size)) {
-            if !cb(i, key, data_piece) {
+        let data_ends_at = cursor_pos + data_header_size;
+        if let Some(data_piece) = data.get(cursor_pos..data_ends_at) {
+            if cb(i, key, data_piece) {
                 break;
             }
         }
+        cursor.set_position(data_ends_at as u64);
     }
     Ok(())
 }
@@ -222,6 +224,19 @@ pub fn get_data_section_by_key(
         }
     });
     ret
+}
+
+/// given the data section (the actual data array in the compiled file, not
+/// the file itself), return a hashmap of all data with their keys
+pub fn get_all_data_sections(
+    data: &[u8]
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    let mut out = HashMap::new();
+    iter_data_section(data, |_, key, data_section| {
+        out.insert(key, data_section.to_vec());
+        false
+    })?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -273,5 +288,34 @@ mod tests {
         let actual_data = data.get(3..2048 + 3).expect("Failed to get actual data section");
         let got_data = get_data_section_by_key("hello", &actual_data[..]).expect("Failed to get hello key from included data");
         assert_eq!(got_data, expected_data);
+    }
+
+    #[test]
+    fn read_write_works2() {
+        let mut out: Vec<u8> = vec![];
+        let mut cursor = Cursor::new(&mut out);
+        generate_included_data(&mut cursor, 2).expect("Failed to generate included data?");
+        let mut data = vec![1, 2, 3];
+        data.extend(out);
+        data.push(4);
+        let expected_data1 = vec![100, 101, 102, 103, 104, 105];
+        let expected_data2 = vec![200, 201, 202, 203, 204, 205];
+        let expected_data3 = vec![33, 34, 35];
+        let write_items = vec![
+            DataToWrite { key: "hello".to_string(), data: expected_data1.clone() },
+            DataToWrite { key: "xyz".to_string(), data: expected_data2.clone() },
+            DataToWrite { key: "abc".to_string(), data: expected_data3.clone() },
+        ];
+        // actual data:
+        write_to_included_section(&mut data, write_items).expect("Failed to write to included section");
+        let actual_data = data.get(3..2048 + 3).expect("Failed to get actual data section");
+        let all_data_map = get_all_data_sections(&actual_data[..]).expect("Failed to get all data map");
+        let data1 = all_data_map.get("hello").expect("Failed to get hello data section");
+        assert_eq!(*data1, expected_data1);
+        let data2 = all_data_map.get("xyz").expect("Failed to get xyz data section");
+        assert_eq!(*data2, expected_data2);
+        let data3 = all_data_map.get("abc").expect("Failed to get abc data section");
+        assert_eq!(*data3, expected_data3);
+        assert_eq!(all_data_map.len(), 3);
     }
 }
