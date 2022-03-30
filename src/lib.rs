@@ -42,7 +42,7 @@ pub fn generate_included_data_file(
     out_path_name: &str,
     num_kb: usize,
 ) -> Result<(), String> {
-    let mut out_file = std::fs::File::open(out_path_name)
+    let mut out_file = std::fs::File::create(out_path_name)
         .map_err(|e| format!("Error opening file: {e}"))?;
     generate_included_data(&mut out_file, num_kb)
 }
