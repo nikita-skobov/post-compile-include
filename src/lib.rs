@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Write, Cursor, Read};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 const WEIRD_CHAR: u8 = b'q';
@@ -114,8 +114,21 @@ pub fn write_to_included_section(
     };
 
     let total_write_data = get_data_write_required_len(&write_data);
-    if total_write_data > weird_data_len {
+    // +4 because we require an initial header of 4 bytes to represent
+    // how much data is being stored in total
+    if total_write_data + 4 > weird_data_len {
         return Err(format!("Attempting to write {} bytes but included data section only has {} available", total_write_data, weird_data_len));
+    }
+    // write this initial header of 4 bytes:
+    let mut header = vec![];
+    let header_size = write_data.len();
+    header.write_u32::<BigEndian>(header_size as u32)
+        .map_err(|e| format!("Failed to write initial header: {e}"))?;
+    if header.len() != 4 {
+        return Err(format!("Failed to write initial header: Expected 4 bytes, but read {}", header.len()));
+    }
+    for byte in header {
+        write_to_included(byte)?;
     }
     for data_item in write_data.drain(..) {
         // write the header of the key length
@@ -154,6 +167,62 @@ pub fn write_to_included_section(
     Ok(())
 }
 
+/// call this from within your actual compiled program and pass in
+/// the included data section (that was modified externally)
+/// this fn will iter that data and call a callback each time it finds a key + data
+/// callback should return false if you want to stop iteration
+pub fn iter_data_section<Cb: FnMut(usize, String, &[u8]) -> bool>(
+    data: &[u8],
+    mut cb: Cb,
+) -> Result<(), String> {
+    let mut cursor = Cursor::new(data);
+    // read the initial size header:
+    let total_data_items = cursor.read_u32::<BigEndian>()
+        .map_err(|e| format!("Failed to read initial header of size 4: {}", e))?;
+    let total_data_items = total_data_items as usize;
+    for i in 0..total_data_items {
+        // read key header:
+        let key_header_size = cursor.read_u16::<BigEndian>()
+            .map_err(|e| format!("Failed to read key header of size 2: {}", e))?;
+        let key_header_size = key_header_size as usize;
+        let mut key_buf = Vec::with_capacity(key_header_size);
+        unsafe { key_buf.set_len(key_header_size) }
+        cursor.read_exact(&mut key_buf)
+            .map_err(|e| format!("Failed to read key of size {}: {}", key_header_size, e))?;
+        let key = String::from_utf8(key_buf)
+            .map_err(|e| format!("Failed to read key as string: {}", e))?;
+        // read data header:
+        let data_header_size = cursor.read_u32::<BigEndian>()
+            .map_err(|e| format!("Failed to read data header of size 4: {}", e))?;
+        let data_header_size = data_header_size as usize;
+        let cursor_pos = cursor.position() as usize;
+        if let Some(data_piece) = data.get(cursor_pos..(cursor_pos + data_header_size)) {
+            if !cb(i, key, data_piece) {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// given the included data section (ie: this is the actual array of data
+/// within the compiled file, not the file itself), return the data section if a section
+/// is found corresponding to the provided key, otherwise return None
+pub fn get_data_section_by_key(
+    key: &str,
+    data: &[u8]
+) -> Option<Vec<u8>> {
+    let mut ret = None;
+    let _ = iter_data_section(data, |_, key_in_data, data_section| {
+        if key_in_data == key {
+            ret = Some(data_section.to_vec());
+            true
+        } else {
+            false
+        }
+    });
+    ret
+}
 
 #[cfg(test)]
 mod tests {
@@ -185,5 +254,24 @@ mod tests {
         let (weird_start, weird_len) = get_weird_indices(&data).expect("Failed to find weird indices");
         assert_eq!(weird_start, 3);
         assert_eq!(weird_len, 2048);
+    }
+
+    #[test]
+    fn read_write_works() {
+        let mut out: Vec<u8> = vec![];
+        let mut cursor = Cursor::new(&mut out);
+        generate_included_data(&mut cursor, 2).expect("Failed to generate included data?");
+        let mut data = vec![1, 2, 3];
+        data.extend(out);
+        data.push(4);
+        let expected_data = vec![100, 101, 102, 103, 104, 105];
+        let write_items = vec![
+            DataToWrite { key: "hello".to_string(), data: expected_data.clone() }
+        ];
+        // actual data:
+        write_to_included_section(&mut data, write_items).expect("Failed to write to included section");
+        let actual_data = data.get(3..2048 + 3).expect("Failed to get actual data section");
+        let got_data = get_data_section_by_key("hello", &actual_data[..]).expect("Failed to get hello key from included data");
+        assert_eq!(got_data, expected_data);
     }
 }
